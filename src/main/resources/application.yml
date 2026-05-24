@@ -1,18 +1,37 @@
 server:
-  port: 8081
+  port: 8085   # 8081 = Schema Registry, 8082 = REST Proxy
 
 spring:
   kafka:
     bootstrap-servers: localhost:9092
+
+    # ── String producer (existing) ──────────────────────────────────
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+    # ── String consumer (existing) ──────────────────────────────────
     consumer:
       group-id: demo-group
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
 
+    # ── Shared Confluent properties ─────────────────────────────────
+    properties:
+      schema.registry.url: http://localhost:8081
+
+# ── Actuator / Prometheus ────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus
+  endpoint:
+    health:
+      show-details: always
+
 app:
   kafka:
     topic: my-topic
+    avro-topic: my-topic-avro

@@ -1,0 +1,32 @@
+{
+  "type": "record",
+  "name": "KafkaMessage",
+  "namespace": "com.example.kafka.avro",
+  "doc": "Schema for messages published to Kafka via Confluent Schema Registry",
+  "fields": [
+    {
+      "name": "id",
+      "type": "string",
+      "doc": "Unique message identifier (UUID)"
+    },
+    {
+      "name": "key",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Optional routing key — determines target partition"
+    },
+    {
+      "name": "content",
+      "type": "string",
+      "doc": "The message payload"
+    },
+    {
+      "name": "timestamp",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      },
+      "doc": "Unix epoch in milliseconds when the message was created"
+    }
+  ]
+}

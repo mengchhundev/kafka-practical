@@ -4,6 +4,9 @@ target/
 *.jar
 *.war
 
+# Avro generated sources (auto-generated at compile time by avro-maven-plugin)
+src/main/java/com/example/kafka/avro/
+
 # Maven wrapper cache
 .mvn/wrapper/maven-wrapper.jar
 
