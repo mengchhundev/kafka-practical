@@ -22,10 +22,7 @@
     },
     {
       "name": "timestamp",
-      "type": {
-        "type": "long",
-        "logicalType": "timestamp-millis"
-      },
+      "type": "long",
       "doc": "Unix epoch in milliseconds when the message was created"
     }
   ]

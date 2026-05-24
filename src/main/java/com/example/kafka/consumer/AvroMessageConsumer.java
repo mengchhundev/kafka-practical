@@ -7,7 +7,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 
-import java.time.Instant;
 
 @Service
 public class AvroMessageConsumer {
@@ -35,6 +34,6 @@ public class AvroMessageConsumer {
                 msg.getId(),
                 msg.getKey(),
                 msg.getContent(),
-                Instant.ofEpochMilli(msg.getTimestamp()));
+                msg.getTimestamp());
     }
 }
