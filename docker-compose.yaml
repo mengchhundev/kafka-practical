@@ -1,0 +1,11 @@
+version: '3'
+services:
+  kafka:
+    build: ./kafka
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka-data:/var/kafka/data
+
+volumes:
+  kafka-data:
