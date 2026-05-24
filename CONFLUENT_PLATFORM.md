@@ -346,7 +346,7 @@ curl -X POST http://localhost:8082/topics/my-topic \
 curl -X POST http://localhost:8082/topics/my-topic-avro \
   -H "Content-Type: application/vnd.kafka.avro.v2+json" \
   -d '{
-    "value_schema": "{\"type\":\"record\",\"name\":\"KafkaMessage\",\"namespace\":\"com.example.kafka.avro\",\"fields\":[{\"name\":\"id\",\"type\":\"string\"},{\"name\":\"key\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"content\",\"type\":\"string\"},{\"name\":\"timestamp\",\"type\":{\"type\":\"long\",\"logicalType\":\"timestamp-millis\"}}]}",
+    "value_schema": "{\"type\":\"record\",\"name\":\"KafkaMessage\",\"namespace\":\"com.example.kafka.avro\",\"fields\":[{\"name\":\"id\",\"type\":\"string\"},{\"name\":\"key\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"content\",\"type\":\"string\"},{\"name\":\"timestamp\",\"type\":\"long\"}]}",
     "records": [
       {
         "value": {
@@ -491,14 +491,22 @@ Control Center
 
 ```
 Topics list view
-┌──────────────────┬──────────────┬──────────────┬──────────┐
-│ Topic Name       │ Partitions   │ Replicas     │ Msgs/sec │
-├──────────────────┼──────────────┼──────────────┼──────────┤
-│ my-topic         │ 3            │ 1            │ 0.5      │
-│ my-topic-avro    │ 3            │ 1            │ 0.2      │
-│ _schemas         │ 1            │ 1            │ 0        │
-└──────────────────┴──────────────┴──────────────┴──────────┘
+┌────────────────────────────────────────┬────────────┬──────────┬──────────┐
+│ Topic Name                             │ Partitions │ Replicas │ Msgs/sec │
+├────────────────────────────────────────┼────────────┼──────────┼──────────┤
+│ my-topic                               │ 3          │ 1        │ 0.5      │
+│ my-topic-avro                          │ 3          │ 1        │ 0.2      │
+│ my-topic-uppercase                     │ 3          │ 1        │ 0.5      │  ← Streams output
+│ my-topic-wordcount                     │ 3          │ 1        │ 0.2      │  ← Streams output
+│ kafka-streams-demo-...-repartition     │ 3          │ 1        │ 0        │  ← Streams internal
+│ kafka-streams-demo-word-count-store-.. │ 1          │ 1        │ 0        │  ← State store backup
+│ _schemas                               │ 1          │ 1        │ 0        │
+└────────────────────────────────────────┴────────────┴──────────┴──────────┘
 ```
+
+> **Kafka Streams internal topics** are managed automatically and prefixed with the
+> `application-id` (`kafka-streams-demo`). Do not delete them — they are used to back up
+> the word count state store and to route repartitioned records.
 
 **Click a topic → Messages tab** to browse messages:
 - Filter by partition, offset range, or timestamp
@@ -518,14 +526,19 @@ Shows every consumer group with their **lag** per partition — the most importa
 
 ```
 Consumer Groups
-┌─────────────────────────┬─────────────────────┬────────┬──────┐
-│ Group ID                │ Topic               │ Lag    │ Status│
-├─────────────────────────┼─────────────────────┼────────┼──────┤
-│ demo-group              │ my-topic            │ 0      │ ✅    │
-│ demo-group-advanced     │ my-topic            │ 0      │ ✅    │
-│ demo-group-avro         │ my-topic-avro       │ 0      │ ✅    │
-└─────────────────────────┴─────────────────────┴────────┴──────┘
+┌─────────────────────────┬─────────────────────┬────────┬────────┐
+│ Group ID                │ Topic               │ Lag    │ Status │
+├─────────────────────────┼─────────────────────┼────────┼────────┤
+│ demo-group              │ my-topic            │ 0      │ ✅     │
+│ demo-group-advanced     │ my-topic            │ 0      │ ✅     │
+│ demo-group-avro         │ my-topic-avro       │ 0      │ ✅     │
+│ kafka-streams-demo      │ my-topic            │ 0      │ ✅     │  ← Kafka Streams
+└─────────────────────────┴─────────────────────┴────────┴────────┘
 ```
+
+> **kafka-streams-demo** is the Kafka Streams application consuming from `my-topic`.
+> Its `application-id` (set in `KafkaStreamsConfig.java`) doubles as the consumer group ID.
+> It processes each message through two branches: uppercase transformation and word count aggregation.
 
 **Click a group** to see per-partition breakdown:
 - Which consumer instance owns each partition
