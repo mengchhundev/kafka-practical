@@ -17,6 +17,13 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
 
+    # ── Kafka Streams ───────────────────────────────────────────────
+    streams:
+      application-id: kafka-streams-demo
+      properties:
+        default.key.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
+        default.value.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
+
     # ── Shared Confluent properties ─────────────────────────────────
     properties:
       schema.registry.url: http://localhost:8081
@@ -35,3 +42,5 @@ app:
   kafka:
     topic: my-topic
     avro-topic: my-topic-avro
+    uppercase-topic: my-topic-uppercase
+    wordcount-topic: my-topic-wordcount

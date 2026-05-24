@@ -34,6 +34,12 @@ public class KafkaConfig {
     @Value("${app.kafka.avro-topic}")
     private String avroTopicName;
 
+    @Value("${app.kafka.uppercase-topic}")
+    private String uppercaseTopicName;
+
+    @Value("${app.kafka.wordcount-topic}")
+    private String wordcountTopicName;
+
     // ── Topics ──────────────────────────────────────────────────────────────
 
     @Bean
@@ -47,6 +53,22 @@ public class KafkaConfig {
     @Bean
     public NewTopic myAvroTopic() {
         return TopicBuilder.name(avroTopicName)
+                .partitions(3)
+                .replicas(1)
+                .build();
+    }
+
+    @Bean
+    public NewTopic myUppercaseTopic() {
+        return TopicBuilder.name(uppercaseTopicName)
+                .partitions(3)
+                .replicas(1)
+                .build();
+    }
+
+    @Bean
+    public NewTopic myWordcountTopic() {
+        return TopicBuilder.name(wordcountTopicName)
                 .partitions(3)
                 .replicas(1)
                 .build();

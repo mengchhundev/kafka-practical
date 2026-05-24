@@ -59,6 +59,12 @@
             <version>${confluent.version}</version>
         </dependency>
 
+        <!-- Kafka Streams -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-streams</artifactId>
+        </dependency>
+
         <!-- Actuator + Prometheus for monitoring -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
