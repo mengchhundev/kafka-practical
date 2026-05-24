@@ -1,5 +1,5 @@
 # Kafka Documentation
-> Spring Boot 3.3 + Kafka 3.7 · KRaft Mode · Docker · Practical Guide
+> Spring Boot 3.3 + **Confluent Platform 7.7** · Avro + Schema Registry · KRaft Mode · Docker
 
 ---
 
@@ -14,79 +14,153 @@
 
 ## 1. How Kafka Works
 
-### 1.1 Core Concepts
+### 1.1 Confluent Platform Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        KAFKA CLUSTER                            │
-│                                                                 │
-│  ┌──────────┐    publish     ┌─────────────────────────────┐   │
-│  │ Producer │ ─────────────► │           Topic             │   │
-│  └──────────┘                │  ┌──────┬──────┬──────┐    │   │
-│                              │  │ P-0  │ P-1  │ P-2  │    │   │
-│  POST /api/kafka/send        │  │off:0 │off:0 │off:0 │    │   │
-│                              │  │off:1 │off:1 │      │    │   │
-│                              │  └──────┴──────┴──────┘    │   │
-│                              └──────────────┬──────────────┘   │
-│                                             │ consume           │
-│                              ┌──────────────▼──────────────┐   │
-│                              │         Consumer Group       │   │
-│                              │  ┌───────────┐              │   │
-│                              │  │ Consumer  │ demo-group   │   │
-│                              │  └───────────┘              │   │
-│                              └─────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                        CONFLUENT PLATFORM STACK                              │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                      Control Center  :9021                          │    │
+│  │            (Web UI — topics, consumers, schemas, lag)               │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│            │                    │                    │                       │
+│  ┌─────────▼──────┐   ┌────────▼────────┐  ┌───────▼────────┐             │
+│  │  Schema        │   │   Kafka Broker  │  │  REST Proxy    │             │
+│  │  Registry      │   │   (KRaft)       │  │  :8082         │             │
+│  │  :8081         │   │   :9092         │  │  (HTTP API)    │             │
+│  └─────────┬──────┘   └────────┬────────┘  └───────┬────────┘             │
+│            │   register/fetch  │  produce/consume   │                       │
+│            │   schema          │                    │                       │
+│  ┌─────────▼──────────────────▼────────────────────▼────────────────┐      │
+│  │                    Spring Boot App  :8085                         │      │
+│  │                                                                   │      │
+│  │  POST /api/kafka/send          → MessageProducer (String)        │      │
+│  │  POST /api/kafka/send-keyed    → MessageProducer (String+key)    │      │
+│  │  POST /api/kafka/avro/send     → AvroMessageProducer             │      │
+│  │  POST /api/kafka/avro/send-keyed → AvroMessageProducer+key       │      │
+│  └───────────────────────────────────────────────────────────────────┘      │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
 
 ### 1.2 Key Components
 
 | Component | Description | In This Project |
 |---|---|---|
-| **Producer** | Publishes messages to a topic | `MessageProducer.java` |
-| **Consumer** | Reads messages from a topic | `MessageConsumer.java` |
-| **Topic** | Named channel for messages | `my-topic` |
-| **Partition** | Ordered, immutable log within a topic | 3 partitions |
-| **Offset** | Unique position of a message in a partition | Auto-tracked |
-| **Consumer Group** | Group of consumers sharing partition load | `demo-group`, `demo-group-advanced` |
-| **Broker** | Kafka server that stores and serves messages | Docker container on port `9092` |
+| **Broker** | Stores and serves messages | `confluentinc/cp-kafka:7.7.0` on port `9092` |
+| **Schema Registry** | Validates and versions Avro/JSON/Protobuf schemas | `cp-schema-registry:7.7.0` on port `8081` |
+| **REST Proxy** | Produce/consume via plain HTTP — no Kafka client needed | `cp-kafka-rest:7.7.0` on port `8082` |
+| **Control Center** | Enterprise web UI — topics, consumers, schemas, lag | `cp-enterprise-control-center:7.7.0` on port `9021` |
+| **String Producer** | Publishes plain text messages | `MessageProducer.java` |
+| **Avro Producer** | Publishes schema-validated Avro messages | `AvroMessageProducer.java` |
+| **String Consumer** | Reads plain text messages | `MessageConsumer.java` |
+| **Avro Consumer** | Reads and deserializes Avro messages | `AvroMessageConsumer.java` |
+| **Topic** | Named channel for messages | `my-topic`, `my-topic-avro` |
+| **Partition** | Ordered, immutable log within a topic | 3 partitions per topic |
+| **Consumer Group** | Group of consumers sharing partition load | `demo-group`, `demo-group-avro` |
 
 ---
 
-### 1.3 Message Flow (Step by Step)
+### 1.3 String Message Flow
 
 ```
-Step 1: Client sends HTTP POST
-──────────────────────────────
-  curl -X POST "http://localhost:8081/api/kafka/send?message=Hello"
+Step 1: HTTP POST to Spring Boot
+─────────────────────────────────
+  curl -X POST "http://localhost:8085/api/kafka/send?message=Hello"
                       │
                       ▼
-Step 2: Controller calls Producer
-──────────────────────────────────
+Step 2: Controller → Producer
+──────────────────────────────
   MessageController.send()
       └── MessageProducer.send("Hello")
               └── kafkaTemplate.send("my-topic", "Hello")
 
-Step 3: Kafka assigns partition
-────────────────────────────────
-  No key supplied → Round-robin across partitions
-  Key supplied    → hash(key) % numPartitions → deterministic partition
+Step 3: Broker assigns partition
+─────────────────────────────────
+  No key → round-robin:   "Hello" → partition=0, offset=0
+  With key → hash(key):   "Hello" → always same partition
 
-  "Hello" → partition=0, offset=0
+Step 4: Broker persists to disk
+─────────────────────────────────
+  Written to Docker volume: broker-data:/tmp/kraft-combined-logs
+  Retained for 7 days (default)
 
-Step 4: Broker persists message
-────────────────────────────────
-  Appended to /var/kafka/data/my-topic-0/
-  Retained for 168 hours (log.retention.hours)
-
-Step 5: Consumers receive message
-───────────────────────────────────
-  demo-group          → MessageConsumer.listen()          → logs value only
+Step 5: Consumers receive
+──────────────────────────
+  demo-group          → MessageConsumer.listen()             → logs value
   demo-group-advanced → MessageConsumer.listenWithMetadata() → logs full record
 ```
 
 ---
 
-### 1.4 Partitions & Consumer Groups
+### 1.4 Avro Message Flow (Schema Registry)
+
+```
+Step 1: HTTP POST
+──────────────────
+  curl -X POST "http://localhost:8085/api/kafka/avro/send?message=Hello"
+                          │
+                          ▼
+Step 2: AvroMessageProducer builds a KafkaMessage object
+──────────────────────────────────────────────────────────
+  KafkaMessage {
+    id:        "550e8400-e29b-41d4-a716-446655440000"
+    key:       null
+    content:   "Hello"
+    timestamp: 1779638788106
+  }
+
+Step 3: KafkaAvroSerializer checks Schema Registry
+────────────────────────────────────────────────────
+  First send: POST http://schema-registry:8081/subjects/my-topic-avro-value/versions
+              ← schema registered, assigned schema ID = 1
+
+  Subsequent sends: schema ID already cached locally, no HTTP call
+
+Step 4: Message wire format (Confluent binary encoding)
+─────────────────────────────────────────────────────────
+  [ 0x00 | schema-id (4 bytes) | avro-payload ]
+   magic     e.g. 0x00000001    binary-encoded fields
+
+Step 5: Broker stores encoded bytes
+────────────────────────────────────
+  Stored in my-topic-avro partitions
+
+Step 6: AvroMessageConsumer deserializes
+──────────────────────────────────────────
+  KafkaAvroDeserializer reads schema ID from bytes
+  → fetches schema from Schema Registry (cached after first fetch)
+  → deserializes bytes back to KafkaMessage object
+  → AvroMessageConsumer.listen() logs all fields
+```
+
+---
+
+### 1.5 Schema Registry — Why It Matters
+
+```
+Without Schema Registry          With Schema Registry
+─────────────────────────        ─────────────────────────────────────
+Producer sends raw JSON          Producer registers schema on first send
+Consumer hopes schema matches    Consumer fetches schema by ID — always compatible
+Schema drift → silent failures   Breaking changes rejected at publish time
+No versioning                    Full schema version history + compatibility rules
+```
+
+**Compatibility modes** (set per subject):
+
+| Mode | Rule |
+|---|---|
+| `BACKWARD` | New schema can read old data — safe for consumer upgrades first |
+| `FORWARD` | Old schema can read new data — safe for producer upgrades first |
+| `FULL` | Both directions — safest, most restrictive |
+| `NONE` | No checks — dev only |
+
+---
+
+### 1.6 Partitions & Consumer Groups
 
 ```
 Topic: my-topic (3 partitions)
@@ -105,119 +179,215 @@ Rule: Each partition is assigned to exactly ONE consumer per group.
       If you add more consumers than partitions → extras sit idle.
 ```
 
-### 1.5 KRaft Mode (No Zookeeper)
+### 1.7 KRaft Mode (No Zookeeper)
 
-This project uses **KRaft** (Kafka Raft Metadata) — Kafka's built-in consensus mode introduced in Kafka 3.3+ that **eliminates the Zookeeper dependency**.
+This project uses **KRaft** — Kafka's built-in Raft consensus that eliminates Zookeeper. Confluent Platform 7.4+ fully supports KRaft in production.
 
 ```
-Traditional Kafka:  Broker ←──── Zookeeper (separate process)
-KRaft Kafka:        Broker + Controller (same process, no Zookeeper!)
+Old:    Broker ←── Zookeeper (separate process, separate ops burden)
+KRaft:  Broker + Controller combined (single process, no Zookeeper!)
 ```
 
-The broker here plays both roles:
-```properties
-process.roles=broker,controller   # dual role
-node.id=1
-controller.quorum.voters=1@localhost:9093
+Configured via environment variables in `docker-compose.yaml`:
+```yaml
+KAFKA_PROCESS_ROLES: broker,controller     # dual role
+KAFKA_NODE_ID: 1
+KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:29093
+CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk        # fixed UUID → stable across restarts
 ```
 
 ---
 
 ## 2. Kafka Configuration
 
-### 2.1 Broker Configuration — `kafka/server.properties`
+### 2.1 Port Map
 
-```properties
-# ── ROLES ──────────────────────────────────────────────────────
-process.roles=broker,controller     # This node is both broker AND controller
-node.id=1                           # Unique ID for this node in the cluster
-
-# ── RAFT CONSENSUS ─────────────────────────────────────────────
-controller.quorum.voters=1@localhost:9093
-# Format: nodeId@host:port — list ALL controller nodes here
-# For multi-node: 1@host1:9093,2@host2:9093,3@host3:9093
-
-# ── LISTENERS ──────────────────────────────────────────────────
-listeners=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-# PLAINTEXT → client-facing (producers/consumers connect here)
-# CONTROLLER → internal Raft traffic between controller nodes
-
-advertised.listeners=PLAINTEXT://localhost:9092
-# What clients use to connect back — MUST be reachable from outside Docker
-
-listener.security.protocol.map=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
-inter.broker.listener.name=PLAINTEXT
-controller.listener.names=CONTROLLER
-
-# ── STORAGE ────────────────────────────────────────────────────
-log.dirs=/var/kafka/data            # Where message data is stored in the container
-
-# ── TOPIC DEFAULTS ─────────────────────────────────────────────
-num.partitions=1                    # Default partition count for new topics
-default.replication.factor=1       # Safe for single-node dev; use 3 in production
-offsets.topic.replication.factor=1
-transaction.state.log.replication.factor=1
-transaction.state.log.min.isr=1
-
-# ── RETENTION ──────────────────────────────────────────────────
-log.retention.hours=168             # Keep messages for 7 days
-log.segment.bytes=1073741824        # Roll a new segment file at 1 GB
-log.retention.check.interval.ms=300000  # Check retention every 5 minutes
-```
+| Port | Service | Notes |
+|---|---|---|
+| `9092` | Kafka Broker (external) | Used by Spring Boot app and CLI tools |
+| `29092` | Kafka Broker (internal) | Used by Schema Registry and REST Proxy inside Docker network |
+| `29093` | KRaft Controller | Internal Raft consensus traffic only |
+| `9101` | JMX | Broker metrics for Prometheus/Grafana |
+| `8081` | Schema Registry | REST API for schema CRUD |
+| `8082` | REST Proxy | HTTP produce/consume API |
+| `9021` | Control Center | Web UI |
+| `8085` | Spring Boot App | Moved from 8081 to avoid conflict with Schema Registry |
 
 ---
 
-### 2.2 Spring Boot Configuration — `application.yml`
+### 2.2 Confluent Platform Stack — `docker-compose.yaml`
+
+```yaml
+services:
+
+  broker:                                        # Kafka broker in KRaft mode
+    image: confluentinc/cp-kafka:7.7.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller     # Combined broker + controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:29093
+      # Three listeners:
+      #   PLAINTEXT      → broker-to-broker (internal Docker network)
+      #   PLAINTEXT_HOST → client-facing (host machine access)
+      #   CONTROLLER     → Raft consensus traffic
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://0.0.0.0:9092,CONTROLLER://broker:29093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk        # Fixed UUID — prevents re-format on restart
+    ports:
+      - "9092:9092"    # Expose only the host-facing listener
+      - "9101:9101"    # JMX metrics
+    volumes:
+      - broker-data:/tmp/kraft-combined-logs     # Persist messages across restarts
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.7.0
+    depends_on:
+      broker:
+        condition: service_healthy              # Wait for broker healthcheck to pass
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: broker:29092   # Uses internal listener
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+
+  rest-proxy:
+    image: confluentinc/cp-kafka-rest:7.7.0
+    depends_on:
+      broker:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - "8082:8082"
+    environment:
+      KAFKA_REST_BOOTSTRAP_SERVERS: broker:29092
+      KAFKA_REST_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+
+  control-center:
+    image: confluentinc/cp-enterprise-control-center:7.7.0
+    depends_on:
+      broker:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - "9021:9021"
+    environment:
+      CONTROL_CENTER_BOOTSTRAP_SERVERS: broker:29092
+      CONTROL_CENTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONTROL_CENTER_REPLICATION_FACTOR: 1
+```
+
+> ⚠️ **Control Center licensing**: Free for 30 days. After that, monitoring features require a Confluent license. For unlimited free monitoring use Kafka UI (`provectuslabs/kafka-ui`) instead.
+
+---
+
+### 2.3 Spring Boot Configuration — `application.yml`
 
 ```yaml
 server:
-  port: 8081
+  port: 8085   # 8081 = Schema Registry, 8082 = REST Proxy
 
 spring:
   kafka:
-    bootstrap-servers: localhost:9092   # Kafka broker address
+    bootstrap-servers: localhost:9092
 
-    # ── PRODUCER ───────────────────────────────────────────────
+    # ── String producer (plain text) ───────────────────────────────
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
-      # acks: all          # Strongest durability — wait for all replicas
-      # retries: 3         # Retry on transient failures
-      # batch-size: 16384  # Batch up to 16KB before sending
 
-    # ── CONSUMER ───────────────────────────────────────────────
+    # ── String consumer ────────────────────────────────────────────
     consumer:
       group-id: demo-group
-      auto-offset-reset: earliest     # Start from beginning if no committed offset
+      auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      # enable-auto-commit: true      # Auto-commit offsets every 5s (default)
-      # max-poll-records: 500         # Max records per poll()
+
+    # ── Shared Confluent properties (used by Avro beans in KafkaConfig) ─
+    properties:
+      schema.registry.url: http://localhost:8081
+
+# ── Actuator / Prometheus ───────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus
 
 app:
   kafka:
-    topic: my-topic
+    topic: my-topic           # String topic
+    avro-topic: my-topic-avro # Avro topic
 ```
-
-#### `auto-offset-reset` values explained:
-
-| Value | Behaviour |
-|---|---|
-| `earliest` | Start from offset 0 — reads all historical messages |
-| `latest` | Start from now — only new messages after consumer starts |
-| `none` | Throw error if no offset found — strict production use |
 
 ---
 
-### 2.3 Topic Configuration — `KafkaConfig.java`
+### 2.4 Avro Schema — `src/main/avro/KafkaMessage.avsc`
+
+```json
+{
+  "type": "record",
+  "name": "KafkaMessage",
+  "namespace": "com.example.kafka.avro",
+  "fields": [
+    { "name": "id",        "type": "string" },
+    { "name": "key",       "type": ["null", "string"], "default": null },
+    { "name": "content",   "type": "string" },
+    { "name": "timestamp", "type": { "type": "long", "logicalType": "timestamp-millis" } }
+  ]
+}
+```
+
+The `avro-maven-plugin` generates `KafkaMessage.java` automatically during `mvn compile` into `src/main/java/com/example/kafka/avro/`. The generated class is excluded from git via `.gitignore`.
+
+---
+
+### 2.5 Avro Kafka Beans — `KafkaConfig.java`
 
 ```java
+// Avro ProducerFactory — uses KafkaAvroSerializer wired to Schema Registry
 @Bean
-public NewTopic myTopic() {
+public ProducerFactory<String, Object> avroProducerFactory() {
+    Map<String, Object> props = new HashMap<>();
+    props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+    props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, KafkaAvroSerializer.class);
+    props.put("schema.registry.url", schemaRegistryUrl);
+    props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);   // no duplicates on retry
+    props.put(ProducerConfig.ACKS_CONFIG, "all");
+    return new DefaultKafkaProducerFactory<>(props);
+}
+
+// Avro ConsumerFactory — fetches schema by ID from Schema Registry
+@Bean
+public ConsumerFactory<String, Object> avroConsumerFactory() {
+    Map<String, Object> props = new HashMap<>();
+    props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, KafkaAvroDeserializer.class);
+    props.put("schema.registry.url", schemaRegistryUrl);
+    props.put(KafkaAvroDeserializerConfig.SPECIFIC_AVRO_READER_CONFIG, true); // → KafkaMessage.class
+    return new DefaultKafkaConsumerFactory<>(props);
+}
+```
+
+---
+
+### 2.6 Topic Configuration — `KafkaConfig.java`
+
+```java
+@Bean public NewTopic myTopic() {
     return TopicBuilder.name("my-topic")
-            .partitions(3)    // 3 partitions → up to 3 consumers in parallel
-            .replicas(1)      // 1 replica (dev only; use 3 in production)
-            .build();
+            .partitions(3).replicas(1).build();
+}
+
+@Bean public NewTopic myAvroTopic() {
+    return TopicBuilder.name("my-topic-avro")
+            .partitions(3).replicas(1).build();
 }
 ```
 
@@ -231,76 +401,47 @@ public NewTopic myTopic() {
 
 ---
 
-### 2.4 Docker Configuration — `docker-compose.yaml` & `Dockerfile`
-
-```yaml
-# docker-compose.yaml
-services:
-  kafka:
-    build: ./kafka          # Builds from kafka/Dockerfile
-    ports:
-      - "9092:9092"         # host:container — expose broker to localhost
-    volumes:
-      - kafka-data:/var/kafka/data   # Persist messages across container restarts
-```
-
-```dockerfile
-# kafka/Dockerfile
-FROM eclipse-temurin:17-jre-alpine     # Lightweight JRE base image
-ARG KAFKA_VERSION=3.7.1
-
-RUN curl ... | tar -xz -C /opt/kafka   # Download & extract Kafka binary
-
-COPY server.properties /opt/kafka/config/kraft/server.properties
-COPY entrypoint.sh /entrypoint.sh
-
-EXPOSE 9092
-ENTRYPOINT ["/entrypoint.sh"]
-```
-
-```bash
-# kafka/entrypoint.sh — smart init script
-if [ ! -f "${KAFKA_LOG_DIRS}/meta.properties" ]; then
-    # First start: generate cluster UUID and format storage
-    CLUSTER_ID=$(kafka-storage.sh random-uuid)
-    kafka-storage.sh format -t "$CLUSTER_ID" -c "$PROPS"
-fi
-# Start broker (subsequent restarts skip the format step)
-exec kafka-server-start.sh "$PROPS"
-```
-
----
-
 ## 3. Debug Kafka in Container
 
-### 3.1 Container Health Check
+### 3.1 Check All Services
 
 ```powershell
-# Check if Kafka container is running
+# Status of all Confluent Platform services
 docker-compose ps
 
-# View live broker logs
-docker-compose logs -f kafka
-
-# View last 100 lines
-docker-compose logs --tail=100 kafka
+# Expected:
+# broker           running (healthy)
+# schema-registry  running (healthy)
+# rest-proxy       running
+# control-center   running
 ```
 
-Expected healthy output:
+```powershell
+# Live logs — watch all services at once
+docker-compose logs -f
+
+# Logs for a specific service
+docker-compose logs -f broker
+docker-compose logs -f schema-registry
+docker-compose logs --tail=50 control-center
 ```
-kafka-1 | [KafkaServer] started (kafka.server.KafkaServer)
+
+**Healthy broker output:**
+```
+broker | [KafkaServer id=1] started
 ```
 
 ---
 
-### 3.2 Enter the Container Shell
+### 3.2 Enter the Broker Container Shell
 
 ```powershell
-# Open a shell inside the Kafka container
-docker-compose exec kafka bash
-
-# Now you're inside — all kafka-*.sh scripts are on PATH
+# All kafka-*.sh scripts are on PATH inside the container
+docker-compose exec broker bash
 ```
+
+> **Note:** The container is now named `broker` (not `kafka`).  
+> Use `docker-compose exec broker <cmd>` for all CLI operations.
 
 ---
 
@@ -309,12 +450,15 @@ docker-compose exec kafka bash
 ```bash
 # ── List all topics ─────────────────────────────────────────────
 kafka-topics.sh --bootstrap-server localhost:9092 --list
+# my-topic
+# my-topic-avro
+# _schemas                    ← Schema Registry internal topic
+# _confluent-monitoring       ← Control Center internal topic
 
-# ── Describe a topic (partitions, replicas, leaders) ────────────
+# ── Describe a topic ────────────────────────────────────────────
 kafka-topics.sh --bootstrap-server localhost:9092 \
     --describe --topic my-topic
 
-# Expected output:
 # Topic: my-topic  Partition: 0  Leader: 1  Replicas: 1  Isr: 1
 # Topic: my-topic  Partition: 1  Leader: 1  Replicas: 1  Isr: 1
 # Topic: my-topic  Partition: 2  Leader: 1  Replicas: 1  Isr: 1
@@ -333,18 +477,7 @@ kafka-topics.sh --bootstrap-server localhost:9092 \
 ### 3.4 Read Messages Directly from Broker
 
 ```bash
-# ── Read ALL messages from the beginning ────────────────────────
-kafka-console-consumer.sh \
-    --bootstrap-server localhost:9092 \
-    --topic my-topic \
-    --from-beginning
-
-# ── Read only NEW messages (live tail) ──────────────────────────
-kafka-console-consumer.sh \
-    --bootstrap-server localhost:9092 \
-    --topic my-topic
-
-# ── Read with metadata (partition + offset + timestamp) ─────────
+# ── Read ALL String messages from my-topic ───────────────────────
 kafka-console-consumer.sh \
     --bootstrap-server localhost:9092 \
     --topic my-topic \
@@ -352,6 +485,16 @@ kafka-console-consumer.sh \
     --property print.partition=true \
     --property print.offset=true \
     --property print.timestamp=true
+
+# ── Read Avro messages (decoded via Schema Registry) ─────────────
+kafka-avro-console-consumer \
+    --bootstrap-server localhost:9092 \
+    --topic my-topic-avro \
+    --from-beginning \
+    --property schema.registry.url=http://schema-registry:8081 \
+    --property print.partition=true \
+    --property print.offset=true
+# Output: {"id":"550e...","key":null,"content":"Hello","timestamp":1779638788106}
 
 # ── Read from a specific partition only ─────────────────────────
 kafka-console-consumer.sh \
@@ -366,18 +509,27 @@ kafka-console-consumer.sh \
 ### 3.5 Publish Messages Directly from Broker
 
 ```bash
-# ── Interactive producer (type messages, press Enter to send) ───
+# ── String messages ──────────────────────────────────────────────
 kafka-console-producer.sh \
     --bootstrap-server localhost:9092 \
     --topic my-topic
+# (type message, press Enter)
 
-# ── Send with a key ──────────────────────────────────────────────
+# ── String messages with key ─────────────────────────────────────
 kafka-console-producer.sh \
     --bootstrap-server localhost:9092 \
     --topic my-topic \
     --property parse.key=true \
     --property key.separator=:
-# Then type:  user-1:Hello from console
+# Type: user-1:Hello from console
+
+# ── Avro messages (schema must already be registered) ────────────
+kafka-avro-console-producer \
+    --bootstrap-server localhost:9092 \
+    --topic my-topic-avro \
+    --property schema.registry.url=http://schema-registry:8081 \
+    --property value.schema='{"type":"record","name":"KafkaMessage","namespace":"com.example.kafka.avro","fields":[{"name":"id","type":"string"},{"name":"key","type":["null","string"],"default":null},{"name":"content","type":"string"},{"name":"timestamp","type":{"type":"long","logicalType":"timestamp-millis"}}]}'
+# Type: {"id":"1","key":null,"content":"test","timestamp":1700000000000}
 ```
 
 ---
@@ -387,16 +539,18 @@ kafka-console-producer.sh \
 ```bash
 # ── List all consumer groups ─────────────────────────────────────
 kafka-consumer-groups.sh --bootstrap-server localhost:9092 --list
+# demo-group
+# demo-group-advanced
+# demo-group-avro
 
 # ── Describe a group (offsets + lag) ────────────────────────────
 kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
     --describe --group demo-group
 
-# Output columns:
 # GROUP        TOPIC     PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
-# demo-group   my-topic  0          5               5               0   ← no lag ✅
+# demo-group   my-topic  0          5               5               0  ✅
 # demo-group   my-topic  1          2               2               0
-# demo-group   my-topic  2          1               1               0
+# demo-group   my-topic  2          3               3               0
 
 # ── Reset offsets (re-consume from beginning) ────────────────────
 kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
@@ -405,20 +559,38 @@ kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
     --reset-offsets --to-earliest --execute
 ```
 
-**LAG** = `LOG-END-OFFSET - CURRENT-OFFSET`. A growing lag means your consumer is falling behind.
+**LAG** = `LOG-END-OFFSET − CURRENT-OFFSET`. A growing lag means your consumer is falling behind.
 
 ---
 
-### 3.7 Check Broker Metadata
+### 3.7 Debug Schema Registry
 
 ```bash
-# Describe the cluster and all brokers
-kafka-metadata-quorum.sh \
-    --bootstrap-server localhost:9092 describe --status
+# ── From host machine (port 8081 exposed) ───────────────────────
 
-# List broker configs
-kafka-configs.sh --bootstrap-server localhost:9092 \
-    --describe --entity-type brokers --entity-name 1
+# List all registered subjects
+curl http://localhost:8081/subjects
+# ["my-topic-avro-value"]
+
+# Get all versions of a subject
+curl http://localhost:8081/subjects/my-topic-avro-value/versions
+# [1]
+
+# Get schema by version
+curl http://localhost:8081/subjects/my-topic-avro-value/versions/1
+# {"subject":"my-topic-avro-value","version":1,"id":1,"schema":"{...}"}
+
+# Get schema by ID
+curl http://localhost:8081/schemas/ids/1
+
+# Check compatibility before evolving a schema
+curl -X POST http://localhost:8081/compatibility/subjects/my-topic-avro-value/versions/latest \
+    -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+    -d '{"schema": "{\"type\":\"record\",\"name\":\"KafkaMessage\",\"namespace\":\"com.example.kafka.avro\",\"fields\":[{\"name\":\"id\",\"type\":\"string\"},{\"name\":\"key\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"content\",\"type\":\"string\"},{\"name\":\"timestamp\",\"type\":{\"type\":\"long\",\"logicalType\":\"timestamp-millis\"}},{\"name\":\"source\",\"type\":[\"null\",\"string\"],\"default\":null}]}"}'
+# {"is_compatible":true}
+
+# Delete a subject (dev only — irreversible in production)
+curl -X DELETE http://localhost:8081/subjects/my-topic-avro-value
 ```
 
 ---
@@ -427,12 +599,14 @@ kafka-configs.sh --bootstrap-server localhost:9092 \
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Connection refused localhost:9092` | Container not running | `docker-compose up -d` |
+| `Connection refused localhost:9092` | Broker not running | `docker-compose up -d` |
 | `LEADER_NOT_AVAILABLE` on startup | Topic being created, brief delay | Wait 2–3s, retry |
-| Consumer not receiving messages | Wrong `group-id` or `auto-offset-reset: latest` | Use `earliest` or reset offsets |
-| `Port 9092 already in use` | Another Kafka/process on 9092 | `docker-compose down` then `up -d` |
-| Messages lost on restart | No volume mounted | Check `volumes:` in `docker-compose.yaml` |
-| `meta.properties` missing error | Corrupt storage | `docker-compose down -v` (⚠ deletes data) then `up -d` |
+| `Schema not found` on consumer start | Schema Registry not ready | Wait for `service_healthy` check; check `docker-compose ps` |
+| `Port 8081 conflict` | Schema Registry vs Spring Boot both on 8081 | Spring Boot is now on port **8085** — ensure you're using correct port |
+| Consumer not receiving messages | Wrong `group-id` or `auto-offset-reset` | Check group name; use `earliest`; or reset offsets |
+| `Connection refused localhost:9021` | Control Center still booting | Takes ~60s — wait and retry |
+| Messages lost on restart | Volume not mounted | Check `volumes: broker-data:` in `docker-compose.yaml` |
+| Avro deserialization error | Schema ID mismatch | Clear broker data + Schema Registry: `docker-compose down -v` ⚠ |
 
 ---
 
@@ -441,29 +615,29 @@ kafka-configs.sh --bootstrap-server localhost:9092 \
 ### 4.1 Start Everything
 
 ```powershell
-# Terminal 1 — Start Kafka broker
+# Terminal 1 — Start Confluent Platform (all 4 services)
 cd D:\DevOps\kafka-practical
 docker-compose up -d
 
-# Verify broker is healthy
-docker-compose logs kafka | Select-String "started"
+# Watch until all services are healthy (~60-90s first run, ~30s after)
+docker-compose ps
 
 # Terminal 2 — Start Spring Boot app
 .\mvnw.cmd spring-boot:run
 # Wait for: "Started KafkaApplication in X seconds"
+# App is available at http://localhost:8085
 ```
 
 ---
 
-### 4.2 Test 1 — Simple Message (No Key)
+### 4.2 Test 1 — String Message (No Key)
 
 ```powershell
-# Windows PowerShell
-Invoke-RestMethod -Method POST `
-    -Uri "http://localhost:8081/api/kafka/send?message=HelloKafka"
+# PowerShell
+Invoke-RestMethod -Method POST -Uri "http://localhost:8085/api/kafka/send?message=HelloKafka"
 
-# Git Bash / WSL / curl.exe
-curl -X POST "http://localhost:8081/api/kafka/send?message=HelloKafka"
+# Git Bash / WSL
+curl -X POST "http://localhost:8085/api/kafka/send?message=HelloKafka"
 ```
 
 **Expected HTTP response:**
@@ -480,156 +654,158 @@ Message sent: HelloKafka
 
 ---
 
-### 4.3 Test 2 — Keyed Message (Deterministic Partition)
+### 4.3 Test 2 — String Keyed Message
 
-```powershell
-# PowerShell
-Invoke-RestMethod -Method POST `
-    -Uri "http://localhost:8081/api/kafka/send-keyed" `
-    -ContentType "application/json" `
-    -Body '{"key":"user-1","message":"Hello from user 1"}'
-
-# Git Bash / WSL
-curl -X POST http://localhost:8081/api/kafka/send-keyed \
+```bash
+curl -X POST http://localhost:8085/api/kafka/send-keyed \
     -H "Content-Type: application/json" \
     -d '{"key":"user-1","message":"Hello from user 1"}'
 ```
 
-**Expected app logs:**
+**Expected logs:**
 ```
 Sent key=[user-1] value=[Hello from user 1] -> partition=2, offset=0
 Received record -> topic=my-topic, partition=2, offset=0, key=user-1, value=Hello from user 1
 ```
 
-> **Key rule:** The same key (`user-1`) **always** goes to the same partition.  
-> Send 5 more messages with `"key":"user-1"` — all land on partition 2, offsets 1 through 5.
+> Same key always routes to the same partition — send 5 more with `"key":"user-1"` and they all land on partition 2 at increasing offsets.
 
 ---
 
-### 4.4 Test 3 — Verify Partition Routing by Key
-
-Send the same key multiple times and a different key:
+### 4.4 Test 3 — Avro Message (Schema Registry)
 
 ```bash
-# All "user-1" messages → same partition
-curl -X POST http://localhost:8081/api/kafka/send-keyed \
-    -H "Content-Type: application/json" \
-    -d '{"key":"user-1","message":"msg A"}'
+# Send Avro message — schema is auto-registered on first send
+curl -X POST "http://localhost:8085/api/kafka/avro/send?message=HelloAvro"
+```
 
-curl -X POST http://localhost:8081/api/kafka/send-keyed \
-    -H "Content-Type: application/json" \
-    -d '{"key":"user-1","message":"msg B"}'
+**Expected app logs:**
+```
+[Avro] Sent id=550e8400-... content='HelloAvro' -> partition=1, offset=0
+[Avro] Received → topic=my-topic-avro, partition=1, offset=0 | id=550e8400-..., key=null, content='HelloAvro', sentAt=2026-05-24T16:06:28Z
+```
 
-# "user-2" → different partition
-curl -X POST http://localhost:8081/api/kafka/send-keyed \
+**Verify the schema was registered:**
+```powershell
+# Host machine
+Invoke-RestMethod http://localhost:8081/subjects
+# ["my-topic-avro-value"]
+
+Invoke-RestMethod http://localhost:8081/subjects/my-topic-avro-value/versions/1
+# id=1, schema={"type":"record","name":"KafkaMessage"...}
+```
+
+---
+
+### 4.5 Test 4 — Avro Keyed Message
+
+```bash
+curl -X POST http://localhost:8085/api/kafka/avro/send-keyed \
     -H "Content-Type: application/json" \
-    -d '{"key":"user-2","message":"msg C"}'
+    -d '{"key":"user-1","message":"Avro from user 1"}'
 ```
 
 **Expected logs:**
 ```
-Sent key=[user-1] value=[msg A] -> partition=2, offset=0
-Sent key=[user-1] value=[msg B] -> partition=2, offset=1   ← same partition, next offset
-Sent key=[user-2] value=[msg C] -> partition=0, offset=1   ← different partition
+[Avro] Sent key='user-1' content='Avro from user 1' -> partition=2, offset=0
+[Avro] Received → topic=my-topic-avro, partition=2, offset=0 | id=..., key=user-1, content='Avro from user 1'
 ```
 
 ---
 
-### 4.5 Test 4 — Verify from Inside the Container
+### 4.6 Test 5 — REST Proxy (No Kafka Client Needed)
+
+Send a message using only HTTP — no Kafka dependency in the caller:
+
+```bash
+# Produce a message via REST Proxy
+curl -X POST http://localhost:8082/topics/my-topic \
+    -H "Content-Type: application/vnd.kafka.json.v2+json" \
+    -d '{"records":[{"value":"Hello from REST Proxy"}]}'
+
+# Response:
+# {"offsets":[{"partition":0,"offset":2,"error_code":null,"error":null}]}
+
+# Produce with a key
+curl -X POST http://localhost:8082/topics/my-topic \
+    -H "Content-Type: application/vnd.kafka.json.v2+json" \
+    -d '{"records":[{"key":"user-1","value":"Keyed via REST Proxy"}]}'
+```
+
+---
+
+### 4.7 Test 6 — Control Center Web UI
+
+1. Open **http://localhost:9021** in your browser
+2. Select your cluster → **Topics** → click `my-topic`
+3. Go to **Messages** tab → you can see every message with partition, offset, timestamp
+4. Go to **Schema Registry** → view registered `KafkaMessage` schema and version history
+5. Go to **Consumer Groups** → check lag for `demo-group` and `demo-group-avro`
+
+---
+
+### 4.8 Test 7 — Read Avro Messages from Container
 
 ```powershell
-# Open container shell
-docker-compose exec kafka bash
-
-# Read all messages from the beginning
-kafka-console-consumer.sh \
+docker-compose exec broker bash
+```
+```bash
+kafka-avro-console-consumer \
     --bootstrap-server localhost:9092 \
-    --topic my-topic \
+    --topic my-topic-avro \
     --from-beginning \
-    --property print.partition=true \
-    --property print.offset=true
-```
-
-**Expected output:**
-```
-Partition:0	Offset:0	HelloKafka
-Partition:2	Offset:0	Hello from user 1
-Partition:2	Offset:1	msg A
-Partition:2	Offset:2	msg B
-Partition:0	Offset:1	msg C
+    --property schema.registry.url=http://schema-registry:8081
+# {"id":"550e8400-...","key":null,"content":"HelloAvro","timestamp":1779638788106}
 ```
 
 ---
 
-### 4.6 Test 5 — Consumer Lag Check
-
-Send 10 messages then immediately check lag:
+### 4.9 Test 8 — Consumer Lag Check
 
 ```bash
-# Inside container — check consumer group lag
+# Inside broker container
 kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
-    --describe --group demo-group
+    --describe --group demo-group-avro
 ```
 
-**Expected output (no lag = healthy):**
 ```
-GROUP        TOPIC     PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
-demo-group   my-topic  0          4               4               0
-demo-group   my-topic  1          2               2               0
-demo-group   my-topic  2          3               3               0
+GROUP           TOPIC          PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+demo-group-avro my-topic-avro  0          2               2               0
+demo-group-avro my-topic-avro  1          1               1               0
+demo-group-avro my-topic-avro  2          1               1               0
 ```
 
 ---
 
-### 4.7 Test 6 — Replay Messages (Reset Offsets)
-
-Re-consume all messages from the beginning without restarting:
+### 4.10 Quick Test Cheatsheet
 
 ```bash
-# 1. Stop the Spring Boot app first (Ctrl+C)
+# ── String messages ──────────────────────────────────────────────
+curl -X POST "http://localhost:8085/api/kafka/send?message=Hello"
+curl -X POST http://localhost:8085/api/kafka/send-keyed \
+     -H "Content-Type: application/json" -d '{"key":"u1","message":"Hi"}'
 
-# 2. Inside container — reset offsets to earliest
-kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
-    --group demo-group \
-    --topic my-topic \
-    --reset-offsets --to-earliest --execute
+# ── Avro messages ────────────────────────────────────────────────
+curl -X POST "http://localhost:8085/api/kafka/avro/send?message=HelloAvro"
+curl -X POST http://localhost:8085/api/kafka/avro/send-keyed \
+     -H "Content-Type: application/json" -d '{"key":"u1","message":"Hi Avro"}'
 
-# 3. Restart the app — all messages are consumed again
-.\mvnw.cmd spring-boot:run
-```
+# ── REST Proxy ───────────────────────────────────────────────────
+curl -X POST http://localhost:8082/topics/my-topic \
+     -H "Content-Type: application/vnd.kafka.json.v2+json" \
+     -d '{"records":[{"value":"Via REST Proxy"}]}'
 
----
+# ── Schema Registry ──────────────────────────────────────────────
+curl http://localhost:8081/subjects
+curl http://localhost:8081/subjects/my-topic-avro-value/versions/1
 
-### 4.8 Quick Test Cheatsheet
+# ── Broker CLI (inside container) ───────────────────────────────
+docker-compose exec broker kafka-topics.sh --bootstrap-server localhost:9092 --list
+docker-compose exec broker kafka-consumer-groups.sh \
+    --bootstrap-server localhost:9092 --describe --group demo-group
 
-```powershell
-# ── Send simple message ──────────────────────────────────────────
-curl -X POST "http://localhost:8081/api/kafka/send?message=Hello"
-
-# ── Send keyed message ───────────────────────────────────────────
-curl -X POST http://localhost:8081/api/kafka/send-keyed \
-     -H "Content-Type: application/json" \
-     -d '{"key":"user-1","message":"Hi"}'
-
-# ── List topics (inside container) ──────────────────────────────
-docker-compose exec kafka kafka-topics.sh \
-    --bootstrap-server localhost:9092 --list
-
-# ── Read all messages (inside container) ────────────────────────
-docker-compose exec kafka kafka-console-consumer.sh \
-    --bootstrap-server localhost:9092 \
-    --topic my-topic --from-beginning
-
-# ── Check consumer lag (inside container) ───────────────────────
-docker-compose exec kafka kafka-consumer-groups.sh \
-    --bootstrap-server localhost:9092 \
-    --describe --group demo-group
-
-# ── Reset offsets to replay all messages ────────────────────────
-docker-compose exec kafka kafka-consumer-groups.sh \
-    --bootstrap-server localhost:9092 \
-    --group demo-group --topic my-topic \
-    --reset-offsets --to-earliest --execute
+# ── Control Center UI ────────────────────────────────────────────
+# http://localhost:9021
 ```
 
 ---
@@ -641,169 +817,165 @@ docker-compose exec kafka kafka-consumer-groups.sh \
 A single-broker setup loses all data if the node goes down. Production requires **at least 3 brokers** so a replica can take over without data loss.
 
 ```
-Dev (current)             Production (minimum)
-──────────────            ────────────────────────────────────────
-1 broker                  3 brokers across 3 availability zones
-1 replica                 3 replicas (RF=3)
-no fault tolerance        survives 1 broker failure without data loss
+Dev (current)              Production (minimum)
+───────────────────         ─────────────────────────────────────────
+1 broker                   3 brokers across 3 availability zones
+RF=1 (no replicas)         RF=3 (survives 1 broker failure)
+no Schema Registry HA      Schema Registry with 3+ instances
+Control Center (trial)     Control Center with Confluent license
 ```
 
-**`server.properties` changes for production:**
+**Production broker env vars (Confluent Platform):**
 
-```properties
-# Replication — never run RF=1 in production
-default.replication.factor=3
-offsets.topic.replication.factor=3
-transaction.state.log.replication.factor=3
-transaction.state.log.min.isr=2       # At least 2 in-sync replicas before ACK
-
-# Durability — flush to disk more aggressively
-log.flush.interval.messages=10000     # Flush every 10k messages
-log.flush.interval.ms=1000            # Or every 1 second, whichever comes first
-
-# Retention — tune to your storage budget
-log.retention.hours=72                # 3 days (adjust per use case)
-log.retention.bytes=10737418240       # 10 GB cap per partition
+```yaml
+KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+KAFKA_MIN_INSYNC_REPLICAS: 2           # Refuse writes if < 2 replicas are in sync
+KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"  # All topics must be explicitly created
+KAFKA_LOG_RETENTION_HOURS: 72
+KAFKA_LOG_RETENTION_BYTES: 10737418240    # 10 GB per partition cap
 ```
 
 ---
 
-### 5.2 Producer: Durability & Reliability
+### 5.2 Schema Registry: Compatibility & Evolution
 
-The default producer settings can **silently lose messages** under broker failures. Harden the producer in `application.yml`:
+```bash
+# Set compatibility mode for a subject (do this before first schema registration)
+curl -X PUT http://localhost:8081/config/my-topic-avro-value \
+    -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+    -d '{"compatibility": "BACKWARD"}'
+
+# Check current compatibility setting
+curl http://localhost:8081/config/my-topic-avro-value
+```
+
+**Safe schema evolution rules (BACKWARD compatible):**
+```json
+// ✅ SAFE — add optional field with default
+{"name": "source", "type": ["null", "string"], "default": null}
+
+// ✅ SAFE — remove a field (old consumers ignore unknown fields)
+
+// ❌ BREAKING — rename a field (treated as delete + add)
+// ❌ BREAKING — change field type (e.g. string → int)
+// ❌ BREAKING — add required field with no default
+```
+
+**Production Schema Registry HA setup:**
+```yaml
+schema-registry-1:
+  image: confluentinc/cp-schema-registry:7.7.0
+  environment:
+    SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: broker-1:29092,broker-2:29092,broker-3:29092
+    SCHEMA_REGISTRY_HOST_NAME: schema-registry-1
+    SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    SCHEMA_REGISTRY_MASTER_ELIGIBILITY: "true"    # This instance can be elected leader
+```
+
+---
+
+### 5.3 Producer: Durability & Reliability
 
 ```yaml
 spring:
   kafka:
     producer:
-      # ── Durability ─────────────────────────────────────────────
-      acks: all              # Wait for ALL in-sync replicas to acknowledge
-                             # (not just the leader). Never use acks=0 or acks=1.
-
-      # ── Retries ────────────────────────────────────────────────
-      retries: 10            # Retry transient network/broker failures
+      acks: all                          # Wait for ALL in-sync replicas
+      retries: 10
       properties:
+        enable.idempotence: true         # No duplicates on retry (already set in KafkaConfig)
+        delivery.timeout.ms: 120000
         retry.backoff.ms: 300
-        delivery.timeout.ms: 120000    # Total time budget for one send (2 min)
-        request.timeout.ms: 30000      # Timeout per broker request
-
-      # ── Idempotence — exactly-once delivery ────────────────────
-      properties:
-        enable.idempotence: true       # Prevents duplicates on retry
-                                       # Requires: acks=all, retries>0
-
-      # ── Batching & Throughput ──────────────────────────────────
-      batch-size: 65536                # Batch up to 64 KB before sending
-      buffer-memory: 33554432          # 32 MB internal send buffer
-      properties:
-        linger.ms: 10                  # Wait up to 10ms to fill a batch
-        compression.type: lz4          # lz4 = best balance speed/ratio
-                                       # Options: none, gzip, snappy, lz4, zstd
+        linger.ms: 10                    # Batch for 10ms to improve throughput
+        compression.type: lz4
+        batch-size: 65536
 ```
 
-> **Rule of thumb:**  
-> `acks=all` + `enable.idempotence=true` + `retries>0` = **at-least-once** with deduplication  
-> Add transactions (`transactional.id`) for true **exactly-once** semantics.
+> **Avro producer already has `acks=all` and `enable.idempotence=true`** configured in `KafkaConfig.java`.  
+> Apply the same settings to the String producer in `application.yml` for production.
 
 ---
 
-### 5.3 Consumer: Reliability & Throughput
+### 5.4 Consumer: Reliability & Throughput
 
 ```yaml
 spring:
   kafka:
     consumer:
-      # ── Offset Management ──────────────────────────────────────
-      enable-auto-commit: false        # NEVER use auto-commit in production
-                                       # It commits before processing completes
-                                       # → messages can be lost on crash
-
-      # ── Polling ────────────────────────────────────────────────
-      max-poll-records: 100            # Process 100 records per poll()
+      enable-auto-commit: false          # Never auto-commit in production
+      max-poll-records: 100
+      auto-offset-reset: latest          # In prod: only new messages; use earliest for replay
       properties:
-        max.poll.interval.ms: 300000   # Max time between polls before
-                                       # Kafka considers consumer dead (5 min)
-        session.timeout.ms: 30000      # Heartbeat timeout (30s)
-        heartbeat.interval.ms: 10000   # Send heartbeat every 10s
-
-      # ── Offset reset — production should be "latest" ───────────
-      auto-offset-reset: latest        # Only process NEW messages on first start
-                                       # Use "earliest" only for event replay
+        max.poll.interval.ms: 300000
+        session.timeout.ms: 30000
+        heartbeat.interval.ms: 10000
     listener:
-      ack-mode: MANUAL_IMMEDIATE       # Commit offset only AFTER successful processing
-      concurrency: 3                   # 3 consumer threads = 1 per partition
+      ack-mode: MANUAL_IMMEDIATE         # Commit offset only after successful processing
+      concurrency: 3                     # 1 thread per partition
 ```
 
-**Manual ACK pattern in your consumer:**
-
+**Manual ACK pattern:**
 ```java
 @KafkaListener(topics = "${app.kafka.topic}", groupId = "demo-group")
 public void listen(String message, Acknowledgment ack) {
     try {
-        // process message...
-        log.info("Processed: {}", message);
-        ack.acknowledge();             // ✅ commit only on success
+        processMessage(message);
+        ack.acknowledge();               // ✅ commit only on success
     } catch (Exception e) {
-        log.error("Processing failed: {}", e.getMessage());
-        // Do NOT ack → message will be redelivered
+        log.error("Failed: {}", e.getMessage());
+        // No ack → message redelivered
     }
 }
 ```
 
 ---
 
-### 5.4 Topic Design
+### 5.5 Topic Design
 
 ```bash
-# Production topic — more partitions = more parallelism
 kafka-topics.sh --bootstrap-server localhost:9092 \
     --create --topic orders \
-    --partitions 12 \             # Rule: num_partitions >= max_consumers_in_group
-    --replication-factor 3 \      # Always 3 in production
-    --config retention.ms=604800000 \   # 7 days in ms
-    --config min.insync.replicas=2 \    # Refuse writes if < 2 replicas are in sync
+    --partitions 12 \
+    --replication-factor 3 \
+    --config retention.ms=604800000 \       # 7 days
+    --config min.insync.replicas=2 \
     --config compression.type=lz4
 ```
 
-**Partition count guidelines:**
+| Throughput Target | Recommended Partitions |
+|---|---|
+| < 10 MB/s | 6 |
+| 10–100 MB/s | 12–24 |
+| > 100 MB/s | 50+ |
 
-| Throughput Target | Recommended Partitions | Notes |
-|---|---|---|
-| < 10 MB/s | 6 | Enough for most microservices |
-| 10–100 MB/s | 12–24 | Match your consumer count |
-| > 100 MB/s | 50+ | Profile first; more partitions = more overhead |
-
-> ⚠️ **You cannot reduce partitions** after creation — only increase. Start conservative and scale up.
+> ⚠️ You cannot reduce partitions after creation — only increase.
 
 ---
 
-### 5.5 Security
-
-**Never run Kafka without auth in production.** The current setup uses `PLAINTEXT` (no encryption, no auth).
-
-#### Enable TLS + SASL/SCRAM in `server.properties`:
-
-```properties
-# Replace PLAINTEXT listener with SSL + SASL
-listeners=SASL_SSL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-advertised.listeners=SASL_SSL://your-broker-host:9092
-listener.security.protocol.map=SASL_SSL:SASL_SSL,CONTROLLER:PLAINTEXT
-
-# TLS
-ssl.keystore.location=/certs/kafka.keystore.jks
-ssl.keystore.password=changeit
-ssl.truststore.location=/certs/kafka.truststore.jks
-ssl.truststore.password=changeit
-ssl.client.auth=required
-
-# SASL
-sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
-sasl.enabled.mechanisms=SCRAM-SHA-512
-```
-
-#### Spring Boot client with SASL/SSL:
+### 5.6 Security
 
 ```yaml
+# docker-compose — enable SASL_SSL on broker
+KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: SASL_SSL:SASL_SSL,CONTROLLER:PLAINTEXT
+KAFKA_LISTENERS: SASL_SSL://0.0.0.0:9092,CONTROLLER://broker:29093
+KAFKA_SSL_KEYSTORE_LOCATION: /certs/kafka.keystore.jks
+KAFKA_SSL_KEYSTORE_PASSWORD: changeit
+KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: SCRAM-SHA-512
+```
+
+```yaml
+# Schema Registry with TLS
+SCHEMA_REGISTRY_LISTENERS: https://0.0.0.0:8081
+SCHEMA_REGISTRY_SSL_KEYSTORE_LOCATION: /certs/schema-registry.keystore.jks
+SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: SASL_SSL
+```
+
+```yaml
+# application.yml — Spring Boot client with SASL_SSL
 spring:
   kafka:
     security:
@@ -815,66 +987,42 @@ spring:
       sasl.mechanism: SCRAM-SHA-512
       sasl.jaas.config: >
         org.apache.kafka.common.security.scram.ScramLoginModule required
-        username="app-user"
-        password="${KAFKA_PASSWORD}";
+        username="app-user" password="${KAFKA_PASSWORD}";
+      schema.registry.url: https://schema-registry:8081
+      basic.auth.credentials.source: USER_INFO
+      basic.auth.user.info: sr-user:${SR_PASSWORD}
 ```
 
 ---
 
-### 5.6 Monitoring & Alerting
+### 5.7 Monitoring & Alerting
 
-#### Key metrics to watch (via JMX / Prometheus):
+**Confluent Control Center** provides built-in monitoring. For Prometheus/Grafana:
+
+```yaml
+# Add JMX exporter sidecar to broker in docker-compose
+broker:
+  environment:
+    KAFKA_JMX_PORT: 9101
+    KAFKA_JMX_HOSTNAME: localhost
+    EXTRA_ARGS: -javaagent:/opt/jmx-exporter/jmx_prometheus_javaagent.jar=9102:/opt/jmx-exporter/kafka.yml
+```
+
+**Key metrics to alert on:**
 
 | Metric | Alert Threshold | What It Means |
 |---|---|---|
-| `kafka.consumer.lag` | > 10,000 | Consumer falling behind — scale up |
-| `UnderReplicatedPartitions` | > 0 | A broker is down or replication is broken |
-| `ActiveControllerCount` | != 1 | Split-brain or no active controller |
-| `RequestHandlerAvgIdlePercent` | < 0.3 (30%) | Broker CPU saturated |
-| `BytesInPerSec` / `BytesOutPerSec` | Near NIC limit | Network bottleneck |
-| `ProducerRequestRate` (errors) | > 0 | Producers are failing |
+| `kafka_consumer_lag` | > 10,000 | Consumer falling behind |
+| `kafka_server_UnderReplicatedPartitions` | > 0 | Broker down or replication broken |
+| `kafka_controller_ActiveControllerCount` | != 1 | No active controller |
+| `kafka_network_RequestHandlerAvgIdlePercent` | < 0.3 | Broker CPU saturated |
+| Schema Registry `master_slave_role` | not `MASTER` | No SR leader elected |
 
-#### Enable Prometheus metrics in Spring Boot (`pom.xml`):
-
-```xml
-<dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-actuator</artifactId>
-</dependency>
-<dependency>
-    <groupId>io.micrometer</groupId>
-    <artifactId>micrometer-registry-prometheus</artifactId>
-</dependency>
-```
-
-```yaml
-# application.yml
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health, metrics, prometheus
-  metrics:
-    tags:
-      application: ${spring.application.name}
-```
-
-Then scrape `http://localhost:8081/actuator/prometheus` with Prometheus.
+**App metrics** available at `http://localhost:8085/actuator/prometheus` (already configured via `micrometer-registry-prometheus` in `pom.xml`).
 
 ---
 
-### 5.7 Dead Letter Queue (DLQ) Pattern
-
-When a consumer fails to process a message after all retries, send it to a DLQ for inspection instead of dropping it.
-
-```yaml
-spring:
-  kafka:
-    listener:
-      # Retry 3 times, then send to DLQ
-      retry-topic-suffix: -retry
-      dlt-topic-suffix: -dlt         # Dead Letter Topic
-```
+### 5.8 Dead Letter Queue (DLQ) Pattern
 
 ```java
 @RetryableTopic(
@@ -884,102 +1032,108 @@ spring:
 )
 @KafkaListener(topics = "${app.kafka.topic}", groupId = "demo-group")
 public void listen(String message) {
-    // If this throws 3 times → message goes to my-topic-dlt
-    processMessage(message);
+    processMessage(message);   // throws 3× → goes to my-topic-dlt
 }
 
 @DltHandler
 public void handleDlt(String message, @Header(KafkaHeaders.RECEIVED_TOPIC) String topic) {
-    log.error("DLQ received failed message from topic={}: {}", topic, message);
-    // Alert, store in DB, or send to Slack
+    log.error("DLQ: failed message from topic={}: {}", topic, message);
+    // store in DB, alert Slack, send to S3 for replay
 }
 ```
 
 ---
 
-### 5.8 Dev vs. Production Config Comparison
+### 5.9 Dev vs. Production Config Comparison
 
 | Setting | This Project (Dev) | Production |
 |---|---|---|
 | Brokers | 1 | 3+ (across AZs) |
 | Replication factor | 1 | 3 |
-| `acks` | default (1) | `all` |
-| `enable.idempotence` | false | true |
+| Schema Registry | 1 instance | 3+ instances (HA) |
+| Schema compatibility | default | `BACKWARD` enforced |
+| `acks` (String) | default (1) | `all` |
+| `acks` (Avro) | `all` ✅ | `all` ✅ |
+| `enable.idempotence` (Avro) | `true` ✅ | `true` ✅ |
 | `enable-auto-commit` | true | false |
 | `ack-mode` | AUTO | `MANUAL_IMMEDIATE` |
 | Security | `PLAINTEXT` | `SASL_SSL` |
-| Partitions | 3 | 12+ (match consumer count) |
-| Monitoring | none | Prometheus + Grafana + alerts |
-| Retention | 168h (7 days) | Per business SLA |
-| Dead Letter Queue | none | Required |
-| Schema registry | none | Confluent / AWS Glue |
+| Control Center | trial (30 days) | licensed |
+| Partitions | 3 | 12+ |
+| Monitoring | Actuator + CC trial | Prometheus + Grafana + CC |
+| DLQ | none | Required |
 
 ---
 
-### 5.9 Production Docker Compose Template
+### 5.10 Production Docker Compose Template (3-Broker Confluent Platform)
 
 ```yaml
-# docker-compose.prod.yml — 3-broker KRaft cluster
-version: '3.8'
+# docker-compose.prod.yml
 services:
-  kafka-1:
-    image: apache/kafka:3.7.1
-    hostname: kafka-1
+  broker-1:
+    image: confluentinc/cp-kafka:7.7.0
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker-1:29093,2@broker-2:29093,3@broker-3:29093
+      KAFKA_LISTENERS: PLAINTEXT://broker-1:29092,CONTROLLER://broker-1:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker-1:29092,PLAINTEXT_HOST://broker-1:9092
       KAFKA_DEFAULT_REPLICATION_FACTOR: 3
       KAFKA_MIN_INSYNC_REPLICAS: 2
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"  # Prevent accidental topic creation
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
     volumes:
-      - kafka-1-data:/var/lib/kafka/data
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-          cpus: "1.5"
+      - broker-1-data:/tmp/kraft-combined-logs
 
-  kafka-2:
-    image: apache/kafka:3.7.1
-    hostname: kafka-2
+  broker-2:
+    image: confluentinc/cp-kafka:7.7.0
     environment:
       KAFKA_NODE_ID: 2
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker-1:29093,2@broker-2:29093,3@broker-3:29093
+      KAFKA_LISTENERS: PLAINTEXT://broker-2:29092,CONTROLLER://broker-2:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker-2:29092,PLAINTEXT_HOST://broker-2:9092
       KAFKA_DEFAULT_REPLICATION_FACTOR: 3
       KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
     volumes:
-      - kafka-2-data:/var/lib/kafka/data
+      - broker-2-data:/tmp/kraft-combined-logs
 
-  kafka-3:
-    image: apache/kafka:3.7.1
-    hostname: kafka-3
+  broker-3:
+    image: confluentinc/cp-kafka:7.7.0
     environment:
       KAFKA_NODE_ID: 3
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker-1:29093,2@broker-2:29093,3@broker-3:29093
+      KAFKA_LISTENERS: PLAINTEXT://broker-3:29092,CONTROLLER://broker-3:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker-3:29092,PLAINTEXT_HOST://broker-3:9092
       KAFKA_DEFAULT_REPLICATION_FACTOR: 3
       KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
     volumes:
-      - kafka-3-data:/var/lib/kafka/data
+      - broker-3-data:/tmp/kraft-combined-logs
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.7.0
+    environment:
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: broker-1:29092,broker-2:29092,broker-3:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+
+  control-center:
+    image: confluentinc/cp-enterprise-control-center:7.7.0
+    environment:
+      CONTROL_CENTER_BOOTSTRAP_SERVERS: broker-1:29092,broker-2:29092,broker-3:29092
+      CONTROL_CENTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONTROL_CENTER_REPLICATION_FACTOR: 3
+    ports:
+      - "9021:9021"
 
 volumes:
-  kafka-1-data:
-  kafka-2-data:
-  kafka-3-data:
+  broker-1-data:
+  broker-2-data:
+  broker-3-data:
 ```
 
 ---
@@ -988,19 +1142,46 @@ volumes:
 
 ```
 kafka-practical/
-├── docker-compose.yaml              # Starts Kafka on port 9092
-├── kafka/
-│   ├── Dockerfile                   # Kafka 3.7.1 on JRE 17 Alpine
-│   ├── server.properties            # KRaft broker config
-│   └── entrypoint.sh                # Auto-formats storage on first start
-└── src/main/java/com/example/kafka/
-    ├── KafkaApplication.java        # Spring Boot entry point
-    ├── config/
-    │   └── KafkaConfig.java         # Creates my-topic (3 partitions)
-    ├── producer/
-    │   └── MessageProducer.java     # send() and sendWithKey()
-    ├── consumer/
-    │   └── MessageConsumer.java     # Two @KafkaListener methods
-    └── controller/
-        └── MessageController.java   # POST /api/kafka/send + /send-keyed
+├── docker-compose.yaml                          # Confluent Platform 7.7 stack
+├── kafka/                                       # Legacy custom image (kept for reference)
+│   ├── Dockerfile                               # No longer used
+│   ├── server.properties                        # No longer used (env vars replace this)
+│   └── entrypoint.sh                            # No longer used
+├── src/
+│   ├── main/
+│   │   ├── avro/
+│   │   │   └── KafkaMessage.avsc                # Avro schema → generates KafkaMessage.java
+│   │   ├── java/com/example/kafka/
+│   │   │   ├── KafkaApplication.java            # Spring Boot entry point
+│   │   │   ├── config/
+│   │   │   │   └── KafkaConfig.java             # Topics + Avro producer/consumer factories
+│   │   │   ├── producer/
+│   │   │   │   ├── MessageProducer.java          # String send() and sendWithKey()
+│   │   │   │   └── AvroMessageProducer.java      # Avro send() and sendWithKey()
+│   │   │   ├── consumer/
+│   │   │   │   ├── MessageConsumer.java          # String @KafkaListener (2 groups)
+│   │   │   │   └── AvroMessageConsumer.java      # Avro @KafkaListener
+│   │   │   └── controller/
+│   │   │       └── MessageController.java        # 4 endpoints: /send /send-keyed /avro/send /avro/send-keyed
+│   │   └── resources/
+│   │       └── application.yml                  # Port 8085, Schema Registry URL, topics
+│   └── test/
+├── pom.xml                                      # Confluent repo, Avro, Schema Registry deps
+├── mvnw / mvnw.cmd                              # Maven wrapper
+├── KAFKA_DOCS.md                                # This file
+└── .gitignore                                   # Excludes target/, generated avro/, .idea/
 ```
+
+### API Endpoints
+
+| Method | URL | Description |
+|---|---|---|
+| `POST` | `/api/kafka/send?message=X` | Send String message (no key) |
+| `POST` | `/api/kafka/send-keyed` | Send String message with key `{"key":"k","message":"v"}` |
+| `POST` | `/api/kafka/avro/send?message=X` | Send Avro message (schema auto-registered) |
+| `POST` | `/api/kafka/avro/send-keyed` | Send Avro message with key `{"key":"k","message":"v"}` |
+| `GET`  | `http://localhost:8081/subjects` | List registered schemas (Schema Registry) |
+| `GET`  | `http://localhost:9021` | Control Center web UI |
+| `POST` | `http://localhost:8082/topics/{name}` | Produce via REST Proxy |
+| `GET`  | `/actuator/health` | App health check |
+| `GET`  | `/actuator/prometheus` | Prometheus metrics |
